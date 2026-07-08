@@ -10,6 +10,8 @@ from discord import app_commands
 from .analysis import analyze_ticker, recommend_minervini_candidates
 from .charting import create_price_chart
 from .config import Settings, load_settings
+from .filters import SECTOR_LABELS, STYLE_LABELS, describe_filters
+from .models import RecommendationFilters
 from .performance import evaluate_recommendations, record_recommendations
 from .reporting import (
     build_performance_report,
@@ -20,7 +22,13 @@ from .reporting import (
 )
 from .validation import validate_candidate
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+    ],
+)
 logger = logging.getLogger("honey-finder")
 
 minervini_group = app_commands.Group(name="미너비니", description="미너비니 조건으로 미국 주식 후보를 선별합니다.")
@@ -44,6 +52,150 @@ class HoneyFinderBot(discord.Client):
             synced = await self.tree.sync()
             logger.info("Synced %s global commands", len(synced))
 
+    async def on_error(self, event_method: str, /, *args, **kwargs) -> None:
+        logger.exception("Unhandled Discord client error in %s", event_method)
+
+
+class MinerviniFilterView(discord.ui.View):
+    def __init__(
+        self,
+        settings: Settings,
+        owner_id: int,
+        limit: int,
+        min_score: int,
+        timeout: float = 180,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.settings = settings
+        self.owner_id = owner_id
+        self.filters = RecommendationFilters(limit=limit, min_score=min_score)
+        self.add_item(SectorSelect(self))
+        self.add_item(StyleSelect(self))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user and interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("이 필터는 명령어를 실행한 사용자만 조작할 수 있습니다.", ephemeral=True)
+        return False
+
+    def panel_text(self) -> str:
+        return "\n".join(
+            [
+                "**미너비니 종목 추천 필터**",
+                "상위 분류에서 섹터를 고르고, 하위 기준에서 세부 스타일을 고른 뒤 `추천 보기`를 누르세요.",
+                "",
+                describe_filters(self.filters),
+                "",
+                "**하위 기준 설명**",
+                "- 균형형: 기본 미너비니 검증 기준",
+                "- 공격형: 75점 이상 강한 모멘텀",
+                "- 보수형: 시가총액 50억 달러, 거래대금 5천만 달러 이상",
+                "- 52주 고점 근접: 현재가가 52주 고점의 85% 이상",
+                "- 거래량 증가: 최근 거래량이 50일 평균보다 10% 이상 많음",
+                "- 재무 품질: 매출 성장과 10% 이상 영업이익률. 이 기준은 정밀 조회라 더 오래 걸릴 수 있습니다.",
+            ]
+        )
+
+    def refresh_select_defaults(self) -> None:
+        for item in self.children:
+            if isinstance(item, SectorSelect):
+                for option in item.options:
+                    option.default = option.value == self.filters.sector
+            if isinstance(item, StyleSelect):
+                for option in item.options:
+                    option.default = option.value == self.filters.style
+
+    async def update_panel(self, interaction: discord.Interaction) -> None:
+        self.refresh_select_defaults()
+        await interaction.response.edit_message(content=self.panel_text(), view=self)
+
+    @discord.ui.button(label="추천 보기", style=discord.ButtonStyle.primary, row=2)
+    async def run_recommendation(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer(thinking=True)
+        try:
+            results = await asyncio.to_thread(
+                recommend_minervini_candidates,
+                self.settings.default_tickers,
+                self.settings,
+                self.filters.limit,
+                self.filters.min_score,
+                self.filters,
+            )
+            batch_id = await asyncio.to_thread(record_recommendations, results, self.filters.min_score)
+            await interaction.followup.send(
+                build_recommendation_report(
+                    results,
+                    scanned_count=len(self.settings.default_tickers),
+                    min_score=self.filters.min_score,
+                    batch_id=batch_id,
+                    filter_summary=describe_filters(self.filters),
+                )
+            )
+        except Exception as exc:
+            logger.exception("Filtered recommendation failed")
+            await interaction.followup.send(f"후보 선별 중 오류가 발생했습니다: `{exc}`")
+
+    @discord.ui.button(label="초기화", style=discord.ButtonStyle.secondary, row=2)
+    async def reset_filters(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.filters = RecommendationFilters(limit=self.filters.limit, min_score=self.filters.min_score)
+        await self.update_panel(interaction)
+
+    @discord.ui.button(label="닫기", style=discord.ButtonStyle.danger, row=2)
+    async def close_panel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="미너비니 추천 필터를 닫았습니다.", view=self)
+
+
+class SectorSelect(discord.ui.Select):
+    def __init__(self, view: MinerviniFilterView) -> None:
+        self.parent_view = view
+        options = [
+            discord.SelectOption(label=label, value=value, default=value == view.filters.sector)
+            for value, label in SECTOR_LABELS.items()
+        ]
+        super().__init__(
+            placeholder="상위 분류: 섹터 선택",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.parent_view.filters = RecommendationFilters(
+            sector=self.values[0],
+            style=self.parent_view.filters.style,
+            min_score=self.parent_view.filters.min_score,
+            limit=self.parent_view.filters.limit,
+        )
+        await self.parent_view.update_panel(interaction)
+
+
+class StyleSelect(discord.ui.Select):
+    def __init__(self, view: MinerviniFilterView) -> None:
+        self.parent_view = view
+        options = [
+            discord.SelectOption(label=label, value=value, default=value == view.filters.style)
+            for value, label in STYLE_LABELS.items()
+        ]
+        super().__init__(
+            placeholder="하위 기준: 세부 필터 선택",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.parent_view.filters = RecommendationFilters(
+            sector=self.parent_view.filters.sector,
+            style=self.values[0],
+            min_score=self.parent_view.filters.min_score,
+            limit=self.parent_view.filters.limit,
+        )
+        await self.parent_view.update_panel(interaction)
+
 
 settings = load_settings()
 bot = HoneyFinderBot(settings)
@@ -54,7 +206,7 @@ async def on_ready() -> None:
     logger.info("Logged in as %s", bot.user)
 
 
-@minervini_group.command(name="종목추천", description="관심 종목군에서 검증 기준을 통과한 미너비니 후보를 보여줍니다.")
+@minervini_group.command(name="종목추천", description="섹터와 세부 기준을 골라 미너비니 후보를 추천합니다.")
 @app_commands.describe(
     limit="표시할 후보 개수입니다. 기본값은 5개입니다.",
     min_score="후보로 인정할 최소 점수입니다. 기본값은 65점입니다.",
@@ -66,27 +218,23 @@ async def recommend(
     min_score: app_commands.Range[int, 0, 100] = 65,
 ) -> None:
     await interaction.response.defer(thinking=True)
+    view = MinerviniFilterView(
+        settings=bot.settings,
+        owner_id=interaction.user.id,
+        limit=limit,
+        min_score=min_score,
+    )
+    await interaction.followup.send(view.panel_text(), view=view)
 
-    try:
-        results = await asyncio.to_thread(
-            recommend_minervini_candidates,
-            bot.settings.default_tickers,
-            bot.settings,
-            limit,
-            min_score,
-        )
-        batch_id = await asyncio.to_thread(record_recommendations, results, min_score)
-        await interaction.followup.send(
-            build_recommendation_report(
-                results,
-                scanned_count=len(bot.settings.default_tickers),
-                min_score=min_score,
-                batch_id=batch_id,
-            )
-        )
-    except Exception as exc:
-        logger.exception("Recommendation command failed")
-        await interaction.followup.send(f"후보 선별 중 오류가 발생했습니다: `{exc}`")
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    logger.exception("Application command failed", exc_info=error)
+    message = f"명령어 처리 중 오류가 발생했습니다: `{error}`"
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 @minervini_group.command(name="진단", description="특정 티커의 미너비니 조건과 재무 보조 지표를 확인합니다.")

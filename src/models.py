@@ -62,3 +62,11 @@ class RecommendationEvaluation:
     days_elapsed: int
     verdict: str
     detail: str
+
+
+@dataclass(frozen=True)
+class RecommendationFilters:
+    sector: str = "all"
+    style: str = "balanced"
+    min_score: int = 65
+    limit: int = 5

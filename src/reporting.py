@@ -35,8 +35,10 @@ def build_report(result: AnalysisResult) -> str:
         "**핵심 지표**",
         f"- 현재가: {_format_price(result.metrics.get('current_price'))}",
         f"- 52주 고점/저점: {_format_price(result.metrics.get('week52_high'))} / {_format_price(result.metrics.get('week52_low'))}",
+        f"- 52주 고점 대비: {_format_metric_percent(result.metrics.get('price_to_52w_high'))}",
         f"- 시가총액: {_format_metric_usd(result.metrics.get('market_cap'))}",
         f"- 50일 평균 거래대금: {_format_metric_usd(result.metrics.get('avg_dollar_volume_50'))}",
+        f"- 섹터/산업: {result.metrics.get('sector') or 'N/A'} / {result.metrics.get('industry') or 'N/A'}",
         f"- 매출 성장률: {_format_metric_percent(result.metrics.get('revenue_growth'))}",
         f"- 영업이익률: {_format_metric_percent(result.metrics.get('operating_margin'))}",
         "",
@@ -54,11 +56,7 @@ def build_report(result: AnalysisResult) -> str:
     lines.extend(f"- {item}" for item in result.cautions)
 
     lines.extend(["", "※ 이 결과는 투자자문이 아니라 데이터 기반 후보 진단입니다."])
-
-    report = "\n".join(lines)
-    if len(report) <= 1900:
-        return report
-    return report[:1850] + "\n\n※ 리포트가 길어 일부 내용이 생략되었습니다."
+    return _trim("\n".join(lines), "리포트")
 
 
 def build_recommendation_report(
@@ -66,11 +64,14 @@ def build_recommendation_report(
     scanned_count: int,
     min_score: int = 65,
     batch_id: str | None = None,
+    filter_summary: str | None = None,
 ) -> str:
     lines = [
         "**미너비니 종목 추천 후보**",
         f"스캔 대상: {scanned_count}개 / 검증 기준: {min_score}점 이상 + 핵심 기술 조건 4개 이상 + 유동성 기준 통과",
     ]
+    if filter_summary:
+        lines.append(filter_summary)
     if batch_id:
         lines.append(f"추천 기록 ID: `{batch_id}`")
     lines.append("")
@@ -78,8 +79,8 @@ def build_recommendation_report(
     if not results:
         lines.extend(
             [
-                "현재 후보군에서는 검증 기준을 모두 통과한 종목을 찾지 못했습니다.",
-                "후보군을 넓히거나 `.env`의 `DEFAULT_TICKERS`를 더 많이 넣어 다시 실행해보세요.",
+                "현재 조건에서는 검증 기준을 모두 통과한 종목을 찾지 못했습니다.",
+                "섹터를 전체로 바꾸거나 하위 기준을 균형형으로 낮춰 다시 실행해보세요.",
                 "",
                 "※ 이 결과는 투자자문이 아니라 데이터 기반 후보 선별입니다.",
             ]
@@ -91,10 +92,11 @@ def build_recommendation_report(
         market_cap = _format_metric_usd(result.metrics.get("market_cap"))
         dollar_volume = _format_metric_usd(result.metrics.get("avg_dollar_volume_50"))
         technical_passed = result.metrics.get("technical_checks_passed")
+        sector = result.metrics.get("sector") or "N/A"
         lines.extend(
             [
                 f"{index}. **{result.ticker}** | {result.name}",
-                f"   등급 {result.grade} / {result.score}점 / 현재가 {price}",
+                f"   등급 {result.grade} / {result.score}점 / 현재가 {price} / 섹터 {sector}",
                 f"   기술 조건 통과 {technical_passed}/6, 시가총액 {market_cap}, 50일 평균 거래대금 {dollar_volume}",
                 f"   {result.summary}",
             ]
@@ -108,10 +110,7 @@ def build_recommendation_report(
             "※ 이 결과는 투자자문이 아니라 데이터 기반 후보 선별입니다.",
         ]
     )
-    report = "\n".join(lines)
-    if len(report) <= 1900:
-        return report
-    return report[:1850] + "\n\n※ 후보가 많아 일부 내용이 생략되었습니다."
+    return _trim("\n".join(lines), "후보")
 
 
 def build_validation_report(validations: list[ValidationResult]) -> str:
@@ -134,10 +133,7 @@ def build_validation_report(validations: list[ValidationResult]) -> str:
         lines.append(f"- 외 {len(validations) - 15}개 생략")
 
     lines.extend(["", "검증 기준은 데이터 충분성, 최소 점수, 핵심 기술 조건, 시가총액, 거래대금, 최소 주가입니다."])
-    report = "\n".join(lines)
-    if len(report) <= 1900:
-        return report
-    return report[:1850] + "\n\n※ 검증 결과가 길어 일부 내용이 생략되었습니다."
+    return _trim("\n".join(lines), "검증 결과")
 
 
 def build_single_validation_report(result: AnalysisResult, validation: ValidationResult) -> str:
@@ -178,7 +174,7 @@ def build_performance_report(evaluations: list[RecommendationEvaluation]) -> str
         lines.extend(
             [
                 f"- **{record.ticker}**: {item.verdict} ({return_text}, {item.days_elapsed}일 경과)",
-                f"  추천가 ${record.price:.2f} → 현재가 {current_price} / 추천 당시 {record.score}점 {record.grade}",
+                f"  추천가 ${record.price:.2f} -> 현재가 {current_price} / 추천 당시 {record.score}점 {record.grade}",
             ]
         )
 
@@ -192,7 +188,10 @@ def build_performance_report(evaluations: list[RecommendationEvaluation]) -> str
             "※ 사후 검증은 추천 로직 개선을 위한 성과 기록이며 투자자문이 아닙니다.",
         ]
     )
-    report = "\n".join(lines)
+    return _trim("\n".join(lines), "결과")
+
+
+def _trim(report: str, label: str) -> str:
     if len(report) <= 1900:
         return report
-    return report[:1850] + "\n\n※ 결과가 길어 일부 내용이 생략되었습니다."
+    return report[:1850] + f"\n\n※ {label}가 길어 일부 내용이 생략되었습니다."

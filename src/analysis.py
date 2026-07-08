@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import pandas as pd
 import yfinance as yf
 
 from .config import Settings
+from .filters import filter_matches, normalize_sector
 from .models import AnalysisResult, CheckResult
 from .validation import is_recommendable
 
@@ -156,7 +158,7 @@ def _financial_signals(ticker: yf.Ticker) -> tuple[list[str], list[str], dict[st
     return positives, cautions, metrics
 
 
-def analyze_ticker(ticker_symbol: str, settings: Settings) -> AnalysisResult:
+def analyze_ticker(ticker_symbol: str, settings: Settings, include_financials: bool = True) -> AnalysisResult:
     symbol = ticker_symbol.strip().upper()
     ticker = yf.Ticker(symbol)
     history = ticker.history(period="1y", interval="1d", auto_adjust=False)
@@ -195,6 +197,8 @@ def analyze_ticker(ticker_symbol: str, settings: Settings) -> AnalysisResult:
 
     info = ticker.info or {}
     name = info.get("shortName") or info.get("longName") or symbol
+    sector = info.get("sector")
+    industry = info.get("industry")
     market_cap = _get_info_number(info, "marketCap")
 
     checks: list[CheckResult] = []
@@ -262,7 +266,18 @@ def analyze_ticker(ticker_symbol: str, settings: Settings) -> AnalysisResult:
         10,
     )
 
-    financial_positives, financial_cautions, financial_metrics = _financial_signals(ticker)
+    if include_financials:
+        financial_positives, financial_cautions, financial_metrics = _financial_signals(ticker)
+    else:
+        financial_positives = []
+        financial_cautions = []
+        financial_metrics = {
+            "revenue_growth": None,
+            "operating_margin": None,
+            "debt_to_assets": None,
+            "trailing_pe": None,
+            "forward_pe": None,
+        }
     positives = financial_positives[:]
     cautions = financial_cautions[:]
 
@@ -293,6 +308,11 @@ def analyze_ticker(ticker_symbol: str, settings: Settings) -> AnalysisResult:
         "market_cap": market_cap,
         "avg_dollar_volume_50": avg_dollar_volume_50,
         "technical_checks_passed": passed_core,
+        "price_to_52w_high": current_price / week52_high,
+        "recent_volume_ratio": recent_volume / avg_volume_50 if avg_volume_50 else None,
+        "sector": sector,
+        "sector_key": normalize_sector(str(sector) if sector else None),
+        "industry": industry,
     }
     metrics.update(financial_metrics)
 
@@ -314,12 +334,23 @@ def recommend_minervini_candidates(
     settings: Settings,
     limit: int = 5,
     min_score: int = 65,
+    filters=None,
 ) -> list[AnalysisResult]:
     results: list[AnalysisResult] = []
+    include_financials = getattr(filters, "style", None) == "quality"
 
-    for ticker in tickers:
-        result = analyze_ticker(ticker, settings)
-        if is_recommendable(result, settings, min_score=min_score):
-            results.append(result)
+    def analyze_for_scan(ticker: str) -> AnalysisResult:
+        return analyze_ticker(ticker, settings, include_financials=include_financials)
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(tickers)))) as executor:
+        futures = [executor.submit(analyze_for_scan, ticker) for ticker in tickers]
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception:
+                continue
+            if is_recommendable(result, settings, min_score=min_score):
+                if filters is None or filter_matches(result, filters, settings):
+                    results.append(result)
 
     return sorted(results, key=lambda item: item.score, reverse=True)[:limit]
