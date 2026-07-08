@@ -209,13 +209,13 @@ async def on_ready() -> None:
 @minervini_group.command(name="종목추천", description="섹터와 세부 기준을 골라 미너비니 후보를 추천합니다.")
 @app_commands.describe(
     limit="표시할 후보 개수입니다. 기본값은 5개입니다.",
-    min_score="후보로 인정할 최소 점수입니다. 기본값은 65점입니다.",
+    min_score="후보로 인정할 최소 점수입니다. 기본값은 85점입니다.",
 )
 @app_commands.rename(limit="개수", min_score="최소점수")
 async def recommend(
     interaction: discord.Interaction,
     limit: app_commands.Range[int, 1, 10] = 5,
-    min_score: app_commands.Range[int, 0, 100] = 65,
+    min_score: app_commands.Range[int, 0, 100] = 85,
 ) -> None:
     await interaction.response.defer(thinking=True)
     view = MinerviniFilterView(
