@@ -7,4 +7,5 @@ __pycache__/
 .ruff_cache/
 charts/
 data/recommendations.json
+data/settings.json
 *.log

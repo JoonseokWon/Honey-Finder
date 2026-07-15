@@ -20,6 +20,7 @@ from .reporting import (
     build_single_validation_report,
     build_validation_report,
 )
+from .runtime_settings import RuntimeSettingsStore
 from .validation import validate_candidate
 
 logging.basicConfig(
@@ -39,6 +40,7 @@ class HoneyFinderBot(discord.Client):
         intents = discord.Intents.default()
         super().__init__(intents=intents)
         self.settings = settings
+        self.runtime_settings = RuntimeSettingsStore(settings.default_tickers)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
@@ -59,14 +61,14 @@ class HoneyFinderBot(discord.Client):
 class MinerviniFilterView(discord.ui.View):
     def __init__(
         self,
-        settings: Settings,
+        bot: HoneyFinderBot,
         owner_id: int,
         limit: int,
         min_score: int,
         timeout: float = 180,
     ) -> None:
         super().__init__(timeout=timeout)
-        self.settings = settings
+        self.bot = bot
         self.owner_id = owner_id
         self.filters = RecommendationFilters(limit=limit, min_score=min_score)
         self.add_item(SectorSelect(self))
@@ -113,10 +115,11 @@ class MinerviniFilterView(discord.ui.View):
     async def run_recommendation(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.defer(thinking=True)
         try:
+            tickers = self.bot.runtime_settings.get_tickers()
             results = await asyncio.to_thread(
                 recommend_minervini_candidates,
-                self.settings.default_tickers,
-                self.settings,
+                tickers,
+                self.bot.settings,
                 self.filters.limit,
                 self.filters.min_score,
                 self.filters,
@@ -125,7 +128,7 @@ class MinerviniFilterView(discord.ui.View):
             await interaction.followup.send(
                 build_recommendation_report(
                     results,
-                    scanned_count=len(self.settings.default_tickers),
+                    scanned_count=len(tickers),
                     min_score=self.filters.min_score,
                     batch_id=batch_id,
                     filter_summary=describe_filters(self.filters),
@@ -219,12 +222,62 @@ async def recommend(
 ) -> None:
     await interaction.response.defer(thinking=True)
     view = MinerviniFilterView(
-        settings=bot.settings,
+        bot=bot,
         owner_id=interaction.user.id,
         limit=limit,
         min_score=min_score,
     )
     await interaction.followup.send(view.panel_text(), view=view)
+
+
+@minervini_group.command(name="후보군", description="추천과 전체 검증에 사용할 티커 후보군을 관리합니다.")
+@app_commands.describe(
+    action="후보군을 조회하거나 변경할 작업입니다.",
+    tickers="쉼표 또는 공백으로 구분한 티커입니다. 조회와 초기화에서는 비워두세요.",
+)
+@app_commands.rename(action="작업", tickers="티커")
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="조회", value="show"),
+        app_commands.Choice(name="추가", value="add"),
+        app_commands.Choice(name="삭제", value="remove"),
+        app_commands.Choice(name="교체", value="replace"),
+        app_commands.Choice(name="초기화", value="reset"),
+    ]
+)
+@app_commands.checks.has_permissions(manage_guild=True)
+async def manage_candidate_tickers(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    tickers: str | None = None,
+) -> None:
+    try:
+        if action.value == "show":
+            current = bot.runtime_settings.get_tickers()
+            heading = "현재 후보군"
+        elif action.value == "reset":
+            current = bot.runtime_settings.reset_tickers()
+            heading = "기본 후보군으로 초기화했습니다"
+        else:
+            if not tickers:
+                await interaction.response.send_message("변경할 티커를 입력하세요.", ephemeral=True)
+                return
+            if action.value == "add":
+                current = bot.runtime_settings.add_tickers(tickers)
+                heading = "후보군에 추가했습니다"
+            elif action.value == "remove":
+                current = bot.runtime_settings.remove_tickers(tickers)
+                heading = "후보군에서 삭제했습니다"
+            else:
+                current = bot.runtime_settings.replace_tickers(tickers)
+                heading = "후보군을 교체했습니다"
+
+        await interaction.response.send_message(
+            f"**{heading}** ({len(current)}개)\n```text\n{','.join(current)}\n```",
+            ephemeral=True,
+        )
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
 
 
 @bot.tree.error
@@ -258,7 +311,7 @@ async def diagnose(interaction: discord.Interaction, ticker: str) -> None:
 
 
 @minervini_group.command(name="검증", description="후보군 전체 또는 특정 티커가 추천 검증 기준을 통과하는지 확인합니다.")
-@app_commands.describe(ticker="비워두면 DEFAULT_TICKERS 전체를 검증합니다.", min_score="검증에 사용할 최소 점수입니다.")
+@app_commands.describe(ticker="비워두면 현재 후보군 전체를 검증합니다.", min_score="검증에 사용할 최소 점수입니다.")
 @app_commands.rename(ticker="티커", min_score="최소점수")
 async def validate(
     interaction: discord.Interaction,
@@ -275,7 +328,7 @@ async def validate(
             return
 
         validations = []
-        for default_ticker in bot.settings.default_tickers:
+        for default_ticker in bot.runtime_settings.get_tickers():
             result = await asyncio.to_thread(analyze_ticker, default_ticker, bot.settings)
             validations.append(validate_candidate(result, bot.settings, min_score=min_score))
         await interaction.followup.send(build_validation_report(validations))
