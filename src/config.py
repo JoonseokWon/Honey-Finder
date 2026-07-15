@@ -28,6 +28,8 @@ class Settings:
     min_market_cap_usd: float
     min_avg_dollar_volume_usd: float
     min_price_usd: float
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
 
 
 def load_settings() -> Settings:
@@ -53,4 +55,7 @@ def load_settings() -> Settings:
             20_000_000,
         ),
         min_price_usd=_get_float("MIN_PRICE_USD", 10),
+        groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+        groq_model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+        or "openai/gpt-oss-120b",
     )

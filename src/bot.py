@@ -11,6 +11,7 @@ from .analysis import analyze_ticker, recommend_minervini_candidates
 from .charting import create_price_chart
 from .config import Settings, load_settings
 from .filters import SECTOR_LABELS, STYLE_LABELS, describe_filters
+from .llm_analysis import LLMConfigurationError, generate_trend_analysis
 from .models import RecommendationFilters
 from .performance import evaluate_recommendations, record_recommendations
 from .reporting import (
@@ -83,18 +84,22 @@ class MinerviniFilterView(discord.ui.View):
     def panel_text(self) -> str:
         return "\n".join(
             [
-                "**미너비니 종목 추천 필터**",
-                "상위 분류에서 섹터를 고르고, 하위 기준에서 세부 스타일을 고른 뒤 `추천 보기`를 누르세요.",
+                "# 미너비니 종목 추천",
+                "## 필터 선택",
+                "> 섹터와 세부 스타일을 고른 뒤 `추천 보기`를 누르세요.",
                 "",
+                "### 현재 설정",
                 describe_filters(self.filters),
                 "",
-                "**하위 기준 설명**",
-                "- 균형형: 기본 미너비니 검증 기준",
-                "- 공격형: 75점 이상 강한 모멘텀",
-                "- 보수형: 시가총액 50억 달러, 거래대금 5천만 달러 이상",
-                "- 52주 고점 근접: 현재가가 52주 고점의 85% 이상",
-                "- 거래량 증가: 최근 거래량이 50일 평균보다 10% 이상 많음",
-                "- 재무 품질: 매출 성장과 10% 이상 영업이익률. 이 기준은 정밀 조회라 더 오래 걸릴 수 있습니다.",
+                "## 하위 기준 설명",
+                "### 기본 스타일",
+                "- **균형형:** 기본 미너비니 검증 기준",
+                "- **공격형:** 75점 이상 강한 모멘텀",
+                "- **보수형:** 시가총액 50억 달러, 거래대금 5천만 달러 이상",
+                "### 집중 조건",
+                "- **52주 고점 근접:** 현재가가 52주 고점의 85% 이상",
+                "- **거래량 증가:** 최근 거래량이 50일 평균보다 10% 이상 많음",
+                "- **재무 품질:** 매출 성장과 10% 이상 영업이익률. 정밀 조회라 더 오래 걸릴 수 있습니다.",
             ]
         )
 
@@ -273,7 +278,7 @@ async def manage_candidate_tickers(
                 heading = "후보군을 교체했습니다"
 
         await interaction.response.send_message(
-            f"**{heading}** ({len(current)}개)\n```text\n{','.join(current)}\n```",
+            f"# {heading}\n### 후보 수\n- **{len(current)}개**\n## 티커 목록\n```text\n{','.join(current)}\n```",
             ephemeral=True,
         )
     except ValueError as exc:
@@ -308,6 +313,23 @@ async def diagnose(interaction: discord.Interaction, ticker: str) -> None:
     except Exception as exc:
         logger.exception("Diagnosis command failed")
         await interaction.followup.send(f"진단 중 오류가 발생했습니다: `{exc}`")
+
+
+@minervini_group.command(name="추세분석", description="LLM이 정량 지표를 근거로 종목 추세와 리스크를 설명합니다.")
+@app_commands.describe(ticker="예: NVDA, AAPL, MSFT")
+@app_commands.rename(ticker="티커")
+async def llm_trend_analysis(interaction: discord.Interaction, ticker: str) -> None:
+    await interaction.response.defer(thinking=True)
+
+    try:
+        result = await asyncio.to_thread(analyze_ticker, ticker, bot.settings)
+        report = await asyncio.to_thread(generate_trend_analysis, result, bot.settings)
+        await interaction.followup.send(report)
+    except LLMConfigurationError as exc:
+        await interaction.followup.send(str(exc), ephemeral=True)
+    except Exception as exc:
+        logger.exception("LLM trend analysis command failed")
+        await interaction.followup.send(f"추세 분석 중 오류가 발생했습니다: `{exc}`")
 
 
 @minervini_group.command(name="검증", description="후보군 전체 또는 특정 티커가 추천 검증 기준을 통과하는지 확인합니다.")
